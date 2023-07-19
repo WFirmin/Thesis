@@ -1,0 +1,626 @@
+---
+title: "Writeup"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, cache=T, message=F, warning=F, fig.show="hold")
+```
+
+## Part A
+
+### Concentration Metric
+In order to measure labor market concentration, I follow a construction by Alan Manning in "Imperfect Competition in the Labor Market."  The original idea is to use the ratio $k$ of the arrival rate of job offers for an employed worker to the rate at which workers leave employment for non-employment.  This captures competition among employers for workers and can be interpreted as the expected number of job offers a worker will receive in a spell of employment (Ridder and van den Berg, 2003).  The rate at which workers leave employment can be easily extracted from existing data, but the rate of offers is more difficult to estimate.  However, simpler search models yield a mapping between this and job-to-job transition rates.  In fact, the ratio of transition rates to employment relative to transition rates to non-employment is monotonically increasing in $k$ and given by
+
+$$[\frac{1+k}{k}\ln(1+k)-1]$$
+(Manning, 2003).  Higher values indicate greater competition in the market, whereas lower values indicate greater concentration.  I estimate both rates with data from the US Census Bureau on Job to Job Flows (J2J), using variables $EES$ and $ENSep$ for transitions to employment and transitions to non-employment respectively.  These are defined below:
+
+##### EES: 
+A worker, i, is defined as having a Stable Job-to-Job Flow with Continuous Employment from a firm, a, (to another firm, b) in a quarter, t, if i
+
+- has a beginning-of-quarter main job with a in t, AND
+
+- does not receive earnings from a in t+1, AND
+
+- receives earnings from a in t-2, AND
+
+- has an end-of-quarter main job with b in t, AND
+
+- does not receive earnings from b in t-1, AND
+
+- receives earnings from b in t+2.
+
+##### ENSep:
+A worker, i, is defined as having a Separation to Nonemployment from a firm, a, in a quarter, t, if i
+
+- has a beginning-of-quarter main job with a in t AND
+
+- has no end-of-quarter main job with any firm in t.
+
+
+Both the employment counts and competition metric come from the J2J data, which spans 2000-2019 at the metropolitan statistical area (MSA) level.  QCEW provides controls such as wages and employment across all industries, while minimum wage data comes from Vaghul and Zipperer (2016).
+
+I estimate the relationship between minimum wage, labor market concentration, and employment using the fixed effects model below:
+
+
+$$\log(E_{mjt})=\beta_0+\beta_1\log(MW_{mt})+\beta_2\log(K_{mjt})+\alpha\log(MW_{mt})\times\log(K_{mjt})+\beta_3\log(E'_{mjt})+\Lambda X_{mjt} +\mu_t+\lambda_j+\epsilon $$
+
+Where $E$ is the employment count, $MW$ is the active minimum wage, $K$ is the concentration metric defined earlier, $E'$ is the employment count from the previous period, $X$ contains several control variables, and $\mu$ and $\lambda$ are fixed effects.  Indices $m$, $j$, and $t$ label metro area, industry, and year respectively.  Fixed effects are included for year and industry, while the lagged dependent variable is used to account for geographical location (MSA).  This follows from Allegretto, Dube, and Zipperer (2017), who suggest this method to account for unobserved heterogeneity where a two-way fixed effects strategy fails.  In addition, I run two separate regressions for employment of young workers and employment in the restaurant and retail industries.  These two groups have typically been used in literature to estimate the effects of minimum wage since they generally experience a greater bite.  The results of the regressions are shown below:
+
+### Results
+
+
+```{r, warning=F, echo=F, out.width="50%"}
+# Concentration results:
+rm(list=ls())
+library(tidyverse)
+library(plm)
+library(lmtest)
+library(car)
+library(gplots)
+library(stargazer)
+library(ggplot2)
+
+data1 = read.csv("ConcData.csv")
+```
+
+```{r}
+data2 = data1
+data2$COMPETITION = data2$EES/data2$ENSep
+data2 = filter(data2, !is.na(data2$COMPETITION), data2$COMPETITION>0, data2$COMPETITION<Inf)
+ggplot(data=data2) +
+  geom_violin(aes(x=agegrp, y=log(COMPETITION),fill=agegrp)) +
+  theme_classic() +
+  labs(x=" ",y="Log Competition") +
+  theme(legend.position="none", legend.background=element_blank(), legend.key=element_blank(),
+        panel.grid.major.y=element_line())
+#ggsave("ConcDistribution.jpg", width=10, height=6)
+```
+
+
+
+```{r, warning=F, echo=F, out.width="50%"}
+formula2 = as.formula("log(MainB) ~ log(minimum_wage) + log(TOTAL_qtrly_estabs_count) + 
+                     log(TOTAL_month1_emplvl) + log(TOTAL_total_qtrly_wages) + log(TOTAL_avg_wkly_wage) +
+                     TOTAL_ref_wage + metro_size + log(MainB_1) + log(MainB_prop_1) + as.factor(quarter)")
+
+
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+COMP = function(d){
+  return(d$EES / d$ENSep)
+}
+
+
+
+# YOUNG WORKERS:
+data = data1
+
+#filter out california:
+data = data[data$state != "CA" & data$num_states == 1 & data$quarterlyMW == 1,]
+
+# filter out unwanted variables:
+data = data[data$agegrp == "A01",]
+#data = data[data$agegrp == "A00" & data$industry %in% c("72","44-45"),]
+# & data$industry %in% c("72","44-45")
+data$MainB_prop_1[is.na(data$MainB_prop_1)] = 1
+
+# Concentration metrics:
+data$competition = COMP(data)
+
+data$ref_wage = data$avg_wkly_wage / data$minimum_wage
+data$TOTAL_ref_wage = data$TOTAL_avg_wkly_wage / data$minimum_wage
+
+
+formula = as.formula("log(MainB) ~ log(minimum_wage) + log(competition) + log(minimum_wage):log(competition) +
+                     log(TOTAL_qtrly_estabs_count) + log(TOTAL_month1_emplvl) + log(TOTAL_total_qtrly_wages) + 
+                     log(TOTAL_avg_wkly_wage) + TOTAL_ref_wage + metro_size + log(MainB_1) + log(MainB_prop_1) + 
+                     as.factor(quarter)")
+
+
+labelCols = c("year","quarter","state","geography","industry")
+logCols = c("avg_wkly_wage","MainB","MainB_prop_1","MainB_1","TOTAL_qtrly_estabs_count","TOTAL_month1_emplvl","TOTAL_total_qtrly_wages","TOTAL_avg_wkly_wage",
+            "minimum_wage","competition")
+otherCols = c("metro_size","TOTAL_ref_wage")
+
+data = data[c(labelCols, logCols, otherCols)]
+data = na.omit(data)
+data3 = data
+for(col in logCols){
+  data = data[data[[col]] > 0 & data[[col]] < Inf,]
+  data3 = data3[data3[[col]] > 0 & data3[[col]] < Inf,]
+  data3[[col]] = log(data3[[col]])
+}
+
+stargazer(data, type="latex",title="Summary Statistics",style="qje")
+
+panelData = data
+panelData$date = panelData$year + (panelData$quarter-1)/4
+panelData$areaQuarter = paste(data$geography, data$quarter)
+panelData$areaQuarterState = paste(panelData$areaQuarter, panelData$state)
+panelData$areaQuarterIndustry = paste(panelData$areaQuarter, data$industry)
+
+panelData = panelData[!is.na(panelData$date),]
+panelData = pdata.frame(panelData, index=c("year","industry","areaQuarterState"))
+
+
+reg.fixed = plm(formula, data=panelData, model="within", effect="twoways")
+
+
+ci = data.frame()
+probs = c(0,0.1,0.7,1)
+q = quantile(panelData$competition, probs=probs, na.rm=T)
+for(i in (1:(length(probs)-1))){
+  dataQ = panelData[panelData$competition < q[i+1] & panelData$competition >= q[i],]
+  tc = qt(0.975, dim(dataQ)[1])
+  r = plm(formula2, data=dataQ, model="within", effect="twoways")
+  s = summary(r)$coefficients
+  vars = dimnames(s)[[1]]
+  #print(summary(r)$coefficients)
+  point = s[vars == "log(minimum_wage)",1]
+  #point = summary(r)$coefficients[1,1]
+  t = s[vars == "log(minimum_wage)",2]
+  #t = summary(r)$coefficients[1,2]
+  fixedS = summary(reg.fixed)$coefficients
+  fixedVars = dimnames(fixedS)[[1]]
+  fixedPoint = fixedS[fixedVars == "log(minimum_wage)",1]
+  fixedPointComp = fixedS[fixedVars == "log(minimum_wage):log(competition)",1]
+  med = median(dataQ$competition)
+  
+  ci = rbind(ci, c(log(med), point, point - tc*t, point + tc*t, fixedPoint + fixedPointComp*log(med)))
+}
+colnames(ci) = c("Log Competition","MW Elasticity of Employment","lower","upper", "Estimated Elasticity")
+ci1A = ci
+
+ci = data.frame()
+probs = seq(0,1,0.1)
+q = quantile(panelData$competition, probs=probs, na.rm=T)
+for(i in (1:(length(probs)-1))){
+  dataQ = panelData[panelData$competition < q[i+1] & panelData$competition >= q[i],]
+  tc = qt(0.975, dim(dataQ)[1])
+  r = plm(formula2, data=dataQ, model="within", effect="twoways")
+  s = summary(r)$coefficients
+  vars = dimnames(s)[[1]]
+  #print(summary(r)$coefficients)
+  point = s[vars == "log(minimum_wage)",1]
+  #point = summary(r)$coefficients[1,1]
+  t = s[vars == "log(minimum_wage)",2]
+  #t = summary(r)$coefficients[1,2]
+  fixedS = summary(reg.fixed)$coefficients
+  fixedVars = dimnames(fixedS)[[1]]
+  fixedPoint = fixedS[fixedVars == "log(minimum_wage)",1]
+  fixedPointComp = fixedS[fixedVars == "log(minimum_wage):log(competition)",1]
+  med = median(dataQ$competition)
+  
+  ci = rbind(ci, c(log(med), point, point - tc*t, point + tc*t, fixedPoint + fixedPointComp*log(med)))
+}
+colnames(ci) = c("Log Competition","MW Elasticity of Employment","lower","upper", "Estimated Elasticity")
+ci1B = ci
+
+
+
+
+
+
+
+# RESTAURANT AND RETAIL:
+data = data1
+
+#filter out california:
+data = data[data$state != "CA" & data$num_states == 1 & data$quarterlyMW == 1,]
+
+# filter out unwanted variables:
+#data = data[data$agegrp == "A01",]
+data = data[data$agegrp == "A00" & data$industry %in% c("72","44-45"),]
+# & data$industry %in% c("72","44-45")
+data$MainB_prop_1[is.na(data$MainB_prop_1)] = 1
+
+# Concentration metrics:
+data$competition = COMP(data)
+#data$competition = data$EE / data$ENFullQ
+
+data$ref_wage = data$avg_wkly_wage / data$minimum_wage
+data$TOTAL_ref_wage = data$TOTAL_avg_wkly_wage / data$minimum_wage
+
+data = data[c(labelCols, logCols, otherCols)]
+data = na.omit(data)
+
+for(col in logCols){
+  data = data[data[[col]] > 0 & data[[col]] < Inf,]
+}
+
+panelData = data
+panelData$date = panelData$year + (panelData$quarter-1)/4
+panelData$areaQuarter = paste(data$geography, data$quarter)
+panelData$areaQuarterState = paste(panelData$areaQuarter, panelData$state)
+panelData$areaQuarterIndustry = paste(panelData$areaQuarter, data$industry)
+
+panelData = panelData[!is.na(panelData$date),]
+panelData = pdata.frame(panelData, index=c("year","industry","areaQuarterState"))
+
+
+reg.fixed2 = plm(formula, data=panelData, model="within", effect="twoways")
+
+ci = data.frame()
+probs = c(0,0.1,0.7,1)
+q = quantile(panelData$competition, probs=probs, na.rm=T)
+for(i in (1:(length(probs)-1))){
+  dataQ = panelData[panelData$competition < q[i+1] & panelData$competition >= q[i],]
+  tc = qt(0.975, dim(dataQ)[1])
+  r = plm(formula2, data=dataQ, model="within", effect="twoways")
+  s = summary(r)$coefficients
+  vars = dimnames(s)[[1]]
+  #print(summary(r)$coefficients)
+  point = s[vars == "log(minimum_wage)",1]
+  #point = summary(r)$coefficients[1,1]
+  t = s[vars == "log(minimum_wage)",2]
+  #t = summary(r)$coefficients[1,2]
+  fixedS = summary(reg.fixed)$coefficients
+  fixedVars = dimnames(fixedS)[[1]]
+  fixedPoint = fixedS[fixedVars == "log(minimum_wage)",1]
+  fixedPointComp = fixedS[fixedVars == "log(minimum_wage):log(competition)",1]
+  med = median(dataQ$competition)
+  
+  ci = rbind(ci, c(log(med), point, point - tc*t, point + tc*t, fixedPoint + fixedPointComp*log(med)))
+}
+colnames(ci) = c("Log Competition","MW Elasticity of Employment","lower","upper", "Estimated Elasticity")
+ci2A = ci
+
+ci = data.frame()
+probs = seq(0,1,0.1)
+q = quantile(panelData$competition, probs=probs, na.rm=T)
+for(i in (1:(length(probs)-1))){
+  dataQ = panelData[panelData$competition < q[i+1] & panelData$competition >= q[i],]
+  tc = qt(0.975, dim(dataQ)[1])
+  r = plm(formula2, data=dataQ, model="within", effect="twoways")
+  s = summary(r)$coefficients
+  vars = dimnames(s)[[1]]
+  #print(summary(r)$coefficients)
+  point = s[vars == "log(minimum_wage)",1]
+  #point = summary(r)$coefficients[1,1]
+  t = s[vars == "log(minimum_wage)",2]
+  #t = summary(r)$coefficients[1,2]
+  fixedS = summary(reg.fixed)$coefficients
+  fixedVars = dimnames(fixedS)[[1]]
+  fixedPoint = fixedS[fixedVars == "log(minimum_wage)",1]
+  fixedPointComp = fixedS[fixedVars == "log(minimum_wage):log(competition)",1]
+  med = median(dataQ$competition)
+  
+  ci = rbind(ci, c(log(med), point, point - tc*t, point + tc*t, fixedPoint + fixedPointComp*log(med)))
+}
+colnames(ci) = c("Log Competition","MW Elasticity of Employment","lower","upper", "Estimated Elasticity")
+ci2B = ci
+
+
+
+stargazer(reg.fixed, reg.fixed2, type="text", column.labels=c("Young Workers","Restaurant/Retail"), star.cutoffs=c(0.05,0.01,0.001), style="qje")
+
+# ggplot(ci1A, aes(`Log Competition`, `MW Elasticity of Employment`)) +        # ggplot2 plot with confidence intervals
+#   #geom_line(aes(x=`Log Competition`, y=`Estimated Elasticity`, color="red")) +
+#   geom_point() +
+#   geom_errorbar(aes(ymin = lower, ymax = upper)) +
+#   labs(title="Young Workers, A")
+
+
+ggplot(ci1B, aes(`Log Competition`, `MW Elasticity of Employment`)) +        # ggplot2 plot with confidence intervals
+  #geom_line(aes(x=`Log Competition`, y=`Estimated Elasticity`, color="red")) +
+  geom_point() +
+  geom_errorbar(aes(ymin = lower, ymax = upper)) +
+  ylim(-1,1) +
+  theme_classic() +
+  theme(panel.grid.major.y=element_line())
+#ggsave("A_young.jpg", width=10, height=6)
+# ggplot(ci2A, aes(`Log Competition`, `MW Elasticity of Employment`)) +        # ggplot2 plot with confidence intervals
+#   #geom_line(aes(x=`Log Competition`, y=`Estimated Elasticity`, color="red")) +
+#   geom_point() +
+#   geom_errorbar(aes(ymin = lower, ymax = upper)) +
+#   labs(title="Restaurant/Retail, A")
+
+
+ggplot(ci2B, aes(`Log Competition`, `MW Elasticity of Employment`)) +        # ggplot2 plot with confidence intervals
+  #geom_line(aes(x=`Log Competition`, y=`Estimated Elasticity`, color="red")) +
+  geom_point() +
+  geom_errorbar(aes(ymin = lower, ymax = upper)) +
+  ylim(-1,1) +
+  theme_classic() +
+  theme(panel.grid.major.y=element_line())
+#ggsave("A_rest.jpg", width=10, height=6)
+```
+
+```{r, warning=F, echo=F, out.width="50%"}
+formula2 = as.formula("log(MainB) ~ log(minimum_wage) + log(TOTAL_qtrly_estabs_count) + 
+                     log(TOTAL_month1_emplvl) + log(TOTAL_total_qtrly_wages) + log(TOTAL_avg_wkly_wage) +
+                     TOTAL_ref_wage + metro_size + log(MainB_1) + log(MainB_prop_1) + as.factor(quarter)")
+
+
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+coefRow = function(r){
+  return(summary(r)$coef["log(minimum_wage):log(competition)",])
+}
+
+results = data.frame()
+numerator = c("EES","EE")
+denominator = c("ENSep","ENFullQ","ENPersist","ENPersistS")
+
+for(num in numerator){
+  print(num)
+  for(den in denominator){
+    print(den)
+    
+    COMP = function(d){
+      return(d[num]/d[den])
+    }
+    # YOUNG WORKERS:
+    data = data1
+    
+    #filter out california:
+    data = data[data$state != "CA" & data$num_states == 1 & data$quarterlyMW == 1,]
+    
+    # filter out unwanted variables:
+    data = data[data$agegrp == "A01",]
+    #data = data[data$agegrp == "A00" & data$industry %in% c("72","44-45"),]
+    # & data$industry %in% c("72","44-45")
+    data$MainB_prop_1[is.na(data$MainB_prop_1)] = 1
+    
+    # Concentration metrics:
+    data$competition = COMP(data)
+    
+    data$ref_wage = data$avg_wkly_wage / data$minimum_wage
+    data$TOTAL_ref_wage = data$TOTAL_avg_wkly_wage / data$minimum_wage
+    
+    
+    formula = as.formula("log(MainB) ~ log(minimum_wage) + log(competition) + log(minimum_wage):log(competition) +
+                         log(TOTAL_qtrly_estabs_count) + log(TOTAL_month1_emplvl) + log(TOTAL_total_qtrly_wages) + 
+                         log(TOTAL_avg_wkly_wage) + TOTAL_ref_wage + metro_size + log(MainB_1) + log(MainB_prop_1) + 
+                         as.factor(quarter)")
+    
+    
+    labelCols = c("year","quarter","state","geography","industry")
+    logCols = c("avg_wkly_wage","MainB","MainB_prop_1","MainB_1","TOTAL_qtrly_estabs_count","TOTAL_month1_emplvl","TOTAL_total_qtrly_wages","TOTAL_avg_wkly_wage",
+                "minimum_wage","competition")
+    otherCols = c("metro_size","TOTAL_ref_wage")
+    
+    data = data[c(labelCols, logCols, otherCols)]
+    data = na.omit(data)
+    
+    for(col in logCols){
+      data = data[data[[col]] > 0 & data[[col]] < Inf,]
+    }
+    
+    panelData = data
+    panelData$date = panelData$year + (panelData$quarter-1)/4
+    panelData$areaQuarter = paste(data$geography, data$quarter)
+    panelData$areaQuarterState = paste(panelData$areaQuarter, panelData$state)
+    panelData$areaQuarterIndustry = paste(panelData$areaQuarter, data$industry)
+    
+    panelData = panelData[!is.na(panelData$date),]
+    panelData = pdata.frame(panelData, index=c("year","industry","areaQuarterState"))
+    
+    
+    reg.fixed = plm(formula, data=panelData, model="within", effect="twoways")
+    results = rbind(results, c(coefRow(reg.fixed),num,den,"YOUNG"))
+    
+    
+    # RESTAURANT AND RETAIL:
+    data = data1
+    
+    #filter out california:
+    data = data[data$state != "CA" & data$num_states == 1 & data$quarterlyMW == 1,]
+    
+    # filter out unwanted variables:
+    #data = data[data$agegrp == "A01",]
+    data = data[data$agegrp == "A00" & data$industry %in% c("72","44-45"),]
+    # & data$industry %in% c("72","44-45")
+    data$MainB_prop_1[is.na(data$MainB_prop_1)] = 1
+    
+    # Concentration metrics:
+    data$competition = COMP(data)
+    #data$competition = data$EE / data$ENFullQ
+    
+    data$ref_wage = data$avg_wkly_wage / data$minimum_wage
+    data$TOTAL_ref_wage = data$TOTAL_avg_wkly_wage / data$minimum_wage
+    
+    data = data[c(labelCols, logCols, otherCols)]
+    data = na.omit(data)
+    
+    for(col in logCols){
+      data = data[data[[col]] > 0 & data[[col]] < Inf,]
+    }
+    
+    panelData = data
+    panelData$date = panelData$year + (panelData$quarter-1)/4
+    panelData$areaQuarter = paste(data$geography, data$quarter)
+    panelData$areaQuarterState = paste(panelData$areaQuarter, panelData$state)
+    panelData$areaQuarterIndustry = paste(panelData$areaQuarter, data$industry)
+    
+    panelData = panelData[!is.na(panelData$date),]
+    panelData = pdata.frame(panelData, index=c("year","industry","areaQuarterState"))
+    
+    
+    reg.fixed2 = plm(formula, data=panelData, model="within", effect="twoways")
+    results = rbind(results, c(coefRow(reg.fixed2),num,den,"REST/RETAIL"))
+        
+        
+  }
+}
+
+
+results
+
+```
+
+
+
+The results of the regression support theoretical expectations: in both groups, increasing competition (towards perfect competition) decreases the effect of minimum wage on employment, whereas decreasing competition (towards monopsony) increases the effect.  In addition, I remove the competition variables from the regression and use it to segment the data, displaying the heterogeneity visually.  The figures show that the minimum wage elasticity of employment is significantly higher at the lowest levels of competition, representing the most monopsonic markets.  It rules insignificant effects that were found without accounting for competition.  For young workers, we can see that the most competitive 50% of markets experience a significant decreasing effect, but the effects at high competition markets for restaurant and retail sectors are not as visible.
+
+
+## Part B
+### Design
+Having found supporting evidence for heterogeneity in the J2J data, I aim to replicate my results in another source of data.  Numerous studies have used microdata from the Current Population Survey (CPS) to measure employment effects at the individual level.  This allows a direct examination of workers near the minimum wage, clearly showing the results of minimum wage policies.  The CPS data extends from 1976 to 2023 but must be cut down to 2000-2016 due to the limitations of the J2J and minimum wage data.  This drastic reduction in data prevents the use of some methods.  For example, replicating the disaggregated methods from Cengiz et al. (2019) just barely manages to reproduce the same results, but further segmenting the data by competition produces noisy estimates.  
+
+This section uses a combination of the CPS, J2J, and minimum wage data sets.  The dependent variable is measured as a binary value indicating the employment of an individual, then multiplied by a weight indicating how many people an individual can be expected to represent in the survey.  Controls include the population of the state, extracted from CPS, and one-period lags of employment-related variables from J2J.  The competition metric is also taken from the J2J data and is merged with the survey data based on location, date, age, and industry.  Location is first matched at the MSA level, but I increase this to the state level or ignore age/industry in the cases where there is a lack of data at that granularity.
+
+I take two approaches to find further evidence of heterogeneity.  The first is similar to the previous, where I use a fixed effects model to regress employment against minimum wage and competition.  For this I construct four total regressions.  The first two do not include competition and serve to test whether its omittence results in insignificant estimates.  The next two include competition.  In each pair, the first model is kept simple while the second includes numerous controls.  The main model (the last) is as follows:
+
+$$\log(E_{i})=\beta_0+\beta_1\log(MW_{i})+\beta_2\log(K_{i})+\alpha\log(MW_{st})\times\log(K_{i})+\Lambda X_{i} +\mu_t+\delta_s+\lambda_j+\epsilon_i $$
+for individual $i$, state $s$, time $t$, and industry $j$.
+
+The second method aims to replicate the event-specific estimates of Cengiz et al. (2019) and uses an event study to examine missing and gained jobs across wage bins surrounding minimum wage increases.  The events are defined as in Vergara (2021): increases must be at least $0.25 (2016 dollars), 2% of the working population must be affected, and there must be no other events within the 3 years prior and 4 years after.  Each event uses a separate data set that consists of the 8 years surrounding the event for the target state and all clean states (those without minimum wage changes during this time).  Then the following model is estimated:
+$$Y_{skth}=\sum_{\tau=-3}^4\alpha_{\tau kh}I_{sth}^\tau+\mu_{skh}+\rho_{kth}+\Omega_{skth}+u_{skth}$$
+where $s$, $k$, $t$, and $h$ indicate the state, $k^{th}$ dollar bin relative to the minimum wage, year, and event respectively.  $Y$ represents the per-capita number of jobs in the specified group, $I^\tau$ is a dummy variable indicating whether this observation is $\tau$ years from the event date, and $\Omega$ contains control variables.  $\mu$ and $\rho$ are fixed effects.
+
+The $\alpha$ coefficients are then used to calculate employment changes: excess jobs at or above minimum wage ($\Delta a_\tau$) and missing jobs below ($\Delta b_\tau$) are defined as
+$$\Delta a_\tau=\frac{\sum_{k=0}^4\alpha_{\tau k}-\sum_{k=0}^4\alpha_{-1k}}{EPOP_{-1}}$$
+$$\Delta b_\tau=\frac{\sum_{k=-4}^{-1}\alpha_{\tau k}-\sum_{k=-4}^{-1}\alpha_{-1k}}{EPOP_{-1}}$$
+where $EPOP_{-1}$ is the sample average employment-to-population ratio just prior to the event (Cengiz et al., 2019).
+
+This part has not been completed yet.
+
+### Results
+
+```{r, warning=F,echo=F, include=F}
+# Individual:
+
+rm(list=ls())
+library(plm)
+library(stargazer)
+data = read.csv("IndividualDataConc2Tenths.csv")
+data$RealMW = data$MW / data$CPI_FACTOR
+data$DIST_YEAR = floor(data$DIST/4)
+data$DIST_YEAR[data$DIST_YEAR == 249] = -999
+data$EMP_RATE = data$empW / data$POPULATION
+data$EMP_RATE_SUB = data$empW / data$POPULATION_SUB
+data$EMP_RATE_SUB[is.na(data$EMP_RATE_SUB)] = 0
+
+data = data[!(colnames(data) %in% c("DIST_F","DIST_B","NextMW"))]
+data = data[data$DIST_YEAR > -100,]
+data$DIST_YEAR[data$DIST_YEAR == -1] = -999
+
+dataAgg = aggregate(empW ~ YEAR + QUARTER + STATE + POPULATION + RealMW + DIST + DIST_YEAR, data=data, FUN=sum)
+dataAgg$empRate = dataAgg$empW / dataAgg$POPULATION
+
+dataAgg2 = aggregate(empW ~ YEAR + QUARTER + STATE + COMP_Q + POPULATION_SUB + POPULATION + RealMW + DIST + DIST_YEAR, data=data, FUN=sum)
+dataAgg2$empRate = dataAgg2$empW / dataAgg2$POPULATION
+dataAgg2$empRate_Sub = dataAgg2$empW / dataAgg2$POPULATION_SUB
+
+controlData = read.csv("ControlData.csv")
+
+controlData = controlData[!grepl("Sep",colnames(controlData))]
+
+
+
+colnames(controlData)[colnames(controlData) %in% c("geography","industry","agegrp","year","quarter")] = c("GEOGRAPHY","INDUSTRY","AGEGRP","YEAR","QUARTER")
+vars = colnames(controlData)[(6:length(colnames(controlData)))]
+labels = colnames(controlData)[(1:3)]
+
+# Create lagged values instead of present values
+controlData$QUARTER = controlData$QUARTER + 1
+controlData$YEAR[controlData$QUARTER==5] = controlData$YEAR[controlData$QUARTER==5] + 1
+controlData$QUARTER[controlData$QUARTER==5] = 1
+
+
+data$GEOGRAPHY = data$METFIPS
+data$GEOGRAPHY[data$GEOGRAPHY > 60] = data$STATEFIP[data$GEOGRAPHY > 60]
+
+totalData = merge(data, controlData,all.x=T)
+keeps = c()
+for(v in colnames(totalData)){
+  if(!sum(is.na(totalData[v]))){
+    keeps = c(keeps,v)
+  }
+}
+totalData = totalData[keeps]
+data = totalData
+
+# for aggregated data
+totalData = merge(dataAgg, controlData[controlData$INDUSTRY=="00" & controlData$AGEGRP=="A00",],all.x=T)
+keeps = c()
+for(v in colnames(totalData)){
+  if(!sum(is.na(totalData[v]))){
+    keeps = c(keeps,v)
+  }
+}
+totalData = totalData[keeps]
+dataAgg = totalData
+
+# agg 2
+totalData = merge(dataAgg2, controlData[controlData$INDUSTRY=="00" & controlData$AGEGRP=="A00",],all.x=T)
+keeps = c()
+for(v in colnames(totalData)){
+  if(!sum(is.na(totalData[v]))){
+    keeps = c(keeps,v)
+  }
+}
+totalData = totalData[keeps]
+dataAgg2 = totalData
+
+rm(controlData)
+
+logControls = c("POPULATION","POPULATION_SUB",colnames(data)[(42:dim(data)[2])])
+logControls = logControls[!(logControls %in% c("MHire","POPULATION","ENPersist"))] #from VIF testing below
+otherControls = c("AGE","as.factor(INDUSTRY)")
+for(v in logControls){
+  data[v] = log(data[v] + min(1,min(data[v][data[v]>0])))
+}
+
+
+
+
+formula1C = formula(paste("log(empW+1) ~ log(RealMW) + as.factor(STATE) + as.factor(YEAR) + AGE + as.factor(INDUSTRY)",paste(logControls,collapse="+"),sep="+"))
+
+reg1 = lm(log(empW+1) ~ log(RealMW) + as.factor(STATE) + as.factor(YEAR), data=data)
+reg1C = lm(formula1C,data=data)
+#  log(COMPETITION+0.001) + log(RealMW):log(COMPETITION+0.001) + 
+# coef = summary(reg1)$coef
+# coef = coef[rownames(coef) %in% c("log(RealMW)","log(RealMW):log(COMPETITION + 0.001)"),]
+# print(coef)
+# coef = summary(reg1C)$coef
+# coef = coef[rownames(coef) %in% c("log(RealMW)","log(RealMW):log(COMPETITION + 0.001)"),]
+# print(coef)
+
+# Add competition:
+formula2C = formula(paste("log(empW+1) ~ log(RealMW) + log(COMPETITION) + log(RealMW):log(COMPETITION) + as.factor(STATE) + as.factor(YEAR) + AGE + as.factor(INDUSTRY)",paste(logControls,collapse="+"),sep="+"))
+reg2 = lm(log(empW+1) ~ log(RealMW) + log(COMPETITION) + log(RealMW):log(COMPETITION) + as.factor(STATE) + as.factor(YEAR), data=filter(data,COMPETITION>0))
+reg2C = lm(formula2C, data=filter(data,COMPETITION>0))
+# coef = summary(reg2)$coef
+# coef = coef[rownames(coef) %in% c("log(RealMW)","log(RealMW):log(COMPETITION + 0.001)"),]
+# print(coef)
+# coef = summary(reg2C)$coef
+# coef = coef[rownames(coef) %in% c("log(RealMW)","log(RealMW):log(COMPETITION + 0.001)"),]
+# print(coef)
+
+
+stargazer(reg1,reg1C,reg2,reg2C,type="text", column.separate=c(2,2), column.labels=c("Basic","With Competition"), 
+          dep.var.labels="Log Employment", star.cutoffs=c(0.05,0.01,0.001), style="qje")
+```
+
+Table 2 displays the key results of the first regressions.  Column 1 shows the results without including controls or competition.  Column 2 then includes controls.  Column 3 includes competition without controls, and column 4 includes both competition and controls.  The results are consistent with both previous literature and the last section of this paper.  Without accounting for competition, no significant effect is found regardless of controls.  The most significant of the two is 0.010 with a standard error of 0.048 (no controls).  This indicates that doubling the minimum wage would result in an expected 1% increase in employment.  The next two columns show that including competition reveals a significant relationship.  Both models find that the employment elasticity with respect to minimum wage decreases with competition.  In other words, more competetive markets experience more negative employment effects.  This corroborates theory and the results from Part A.
+
+Next: show how elasticity changes with deciles of competition: either just calculating and showing histogram, or re-estimating like in part A.  Finish event-specific estimates.
+
+
+
+
+## References
+
+**Allegretto, S., Dube, A., Reich, M., & Zipperer, B. (2013)**. Credible Research Designs for Minimum Wage Studies. *UC Berkeley: Institute for Research on Labor and Employment*. Retrieved from https://escholarship.org/uc/item/3hk7s3fw
+
+**Doruk Cengiz, Arindrajit Dube, Attila Lindner, Ben Zipperer**, The Effect of Minimum Wages on Low-Wage Jobs, *The Quarterly Journal of Economics*, Volume 134, Issue 3, August 2019, Pages 1405–1454, https://doi.org/10.1093/qje/qjz014
+
+**Manning, Alan**. “Chapter 11 - Imperfect Competition in the Labor Market.” *In Handbook of Labor Economics*, edited by David Card and Orley Ashenfelter, Pages 973-1041.  Elsevier, 2011.  https://doi.org/10.1016/S0169-7218(11)02409-9.
+
+**Ridder, Geert and van den Berg, Gerard**, (2003), Measuring Labor Market Frictions: A Cross-Country Comparison, No 814, IZA Discussion Papers, Institute of Labor Economics (IZA), https://EconPapers.repec.org/RePEc:iza:izadps:dp814.
+
+**Vaghul, K., Zipperer, B.** (2016).  Historical State and Sub-State Minimum Wage Data.  *Washington Center for Equitable Growth*.  http://equitablegrowth.org/working-papers/historical-state-and-sub-state-minimum-wage-data
+
+**Vergara, D.** (2021).  Minimum Wages and Optimal Redistribution.  https://dvergarad.github.io/files/JMP_DV.pdf
+

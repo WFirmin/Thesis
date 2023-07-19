@@ -1,0 +1,757 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+J2J Data Method:
+```{r, warning=F, echo=F, out.width="50%"}
+# Concentration results:
+rm(list=ls())
+library(tidyverse)
+library(plm)
+library(lmtest)
+library(car)
+library(gplots)
+library(stargazer)
+library(ggplot2)
+library(rrscale) # asinh
+
+data1 = read.csv("ConcData.csv")
+```
+
+
+Original:
+```{r, warning=F, echo=F, out.width="50%"}
+formula2 = as.formula("log(MainB) ~ log(minimum_wage) + log(TOTAL_qtrly_estabs_count) + 
+                     log(TOTAL_month1_emplvl) + log(TOTAL_total_qtrly_wages) + log(TOTAL_avg_wkly_wage) +
+                     TOTAL_ref_wage + metro_size + log(MainB_1) + log(MainB_prop_1) + as.factor(quarter)")
+
+
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+COMP = function(d){
+  return(d$EES / d$ENSep)
+}
+
+
+summarycols1 = c("avg_wkly_wage","MainB","TOTAL_qtrly_estabs_count","TOTAL_month1_emplvl","TOTAL_total_qtrly_wages","TOTAL_avg_wkly_wage","minimum_wage","competition","metro_size","TOTAL_ref_wage")
+summarylabels1=c("Avg Weekly Wage","Employment","Total Qtly Establishments","Total Employment Level","Total Qtly Wages","Total Avg Weekly Wage","Minimum Wage","Log Competition","Metro Size","Total Reference Wage")
+
+# YOUNG WORKERS:
+data = data1
+
+#filter out california:
+data = data[data$state != "CA" & data$num_states == 1 & data$quarterlyMW == 1,]
+
+# filter out unwanted variables:
+data = data[data$agegrp == "A01",]
+#data = data[data$agegrp == "A00" & data$industry %in% c("72","44-45"),]
+# & data$industry %in% c("72","44-45")
+data$MainB_prop_1[is.na(data$MainB_prop_1)] = 1
+
+# Concentration metrics:
+data$competition = COMP(data)
+
+data$ref_wage = data$avg_wkly_wage / data$minimum_wage
+data$TOTAL_ref_wage = data$TOTAL_avg_wkly_wage / data$minimum_wage
+
+
+formula = as.formula("log(MainB) ~ log(minimum_wage) + log(competition) + log(minimum_wage):log(competition) +
+                     log(TOTAL_qtrly_estabs_count) + log(TOTAL_month1_emplvl) + log(TOTAL_total_qtrly_wages) + 
+                     log(TOTAL_avg_wkly_wage) + TOTAL_ref_wage + metro_size + log(MainB_1) + log(MainB_prop_1) + 
+                     as.factor(quarter)")
+
+
+labelCols = c("year","quarter","state","geography","industry")
+logCols = c("avg_wkly_wage","MainB","MainB_prop_1","MainB_1","TOTAL_qtrly_estabs_count","TOTAL_month1_emplvl","TOTAL_total_qtrly_wages","TOTAL_avg_wkly_wage",
+            "minimum_wage","competition")
+otherCols = c("metro_size","TOTAL_ref_wage")
+
+data = data[c(labelCols, logCols, otherCols)]
+data = na.omit(data)
+data3 = data
+for(col in logCols){
+  data = data[data[[col]] > 0 & data[[col]] < Inf,]
+  #data3 = data3[data3[[col]] > 0 & data3[[col]] < Inf,]
+  #data3[[col]] = log(data3[[col]])
+}
+data3 = data
+data3$competition = log(data3$competition)
+stargazer(data3[summarycols1], type="latex",title="Summary Statistics",style="qje", summary.stat=c("n","mean","median","sd"), covariate.labels=summarylabels1)
+
+panelData = data
+panelData$date = panelData$year + (panelData$quarter-1)/4
+panelData$areaQuarter = paste(data$geography, data$quarter)
+panelData$areaQuarterState = paste(panelData$areaQuarter, panelData$state)
+panelData$areaQuarterIndustry = paste(panelData$areaQuarter, data$industry)
+
+panelData = panelData[!is.na(panelData$date),]
+panelData = pdata.frame(panelData, index=c("year","industry","areaQuarterState"))
+
+
+reg.fixed = plm(formula, data=panelData, model="within", effect="twoways")
+
+
+ci = data.frame()
+probs = c(0,0.1,0.7,1)
+q = quantile(panelData$competition, probs=probs, na.rm=T)
+for(i in (1:(length(probs)-1))){
+  dataQ = panelData[panelData$competition < q[i+1] & panelData$competition >= q[i],]
+  tc = qt(0.975, dim(dataQ)[1])
+  r = plm(formula2, data=dataQ, model="within", effect="twoways")
+  s = summary(r)$coefficients
+  vars = dimnames(s)[[1]]
+  #print(summary(r)$coefficients)
+  point = s[vars == "log(minimum_wage)",1]
+  #point = summary(r)$coefficients[1,1]
+  t = s[vars == "log(minimum_wage)",2]
+  #t = summary(r)$coefficients[1,2]
+  fixedS = summary(reg.fixed)$coefficients
+  fixedVars = dimnames(fixedS)[[1]]
+  fixedPoint = fixedS[fixedVars == "log(minimum_wage)",1]
+  fixedPointComp = fixedS[fixedVars == "log(minimum_wage):log(competition)",1]
+  med = median(dataQ$competition)
+  
+  ci = rbind(ci, c(log(med), point, point - tc*t, point + tc*t, fixedPoint + fixedPointComp*log(med)))
+}
+colnames(ci) = c("Log Competition","MW Elasticity of Employment","lower","upper", "Estimated Elasticity")
+ci1A = ci
+
+ci = data.frame()
+probs = seq(0,1,0.1)
+q = quantile(panelData$competition, probs=probs, na.rm=T)
+for(i in (1:(length(probs)-1))){
+  dataQ = panelData[panelData$competition < q[i+1] & panelData$competition >= q[i],]
+  tc = qt(0.975, dim(dataQ)[1])
+  r = plm(formula2, data=dataQ, model="within", effect="twoways")
+  s = summary(r)$coefficients
+  vars = dimnames(s)[[1]]
+  #print(summary(r)$coefficients)
+  point = s[vars == "log(minimum_wage)",1]
+  #point = summary(r)$coefficients[1,1]
+  t = s[vars == "log(minimum_wage)",2]
+  #t = summary(r)$coefficients[1,2]
+  fixedS = summary(reg.fixed)$coefficients
+  fixedVars = dimnames(fixedS)[[1]]
+  fixedPoint = fixedS[fixedVars == "log(minimum_wage)",1]
+  fixedPointComp = fixedS[fixedVars == "log(minimum_wage):log(competition)",1]
+  med = median(dataQ$competition)
+  
+  ci = rbind(ci, c(log(med), point, point - tc*t, point + tc*t, fixedPoint + fixedPointComp*log(med)))
+}
+colnames(ci) = c("Log Competition","MW Elasticity of Employment","lower","upper", "Estimated Elasticity")
+ci1B = ci
+
+
+
+
+
+
+
+# RESTAURANT AND RETAIL:
+data = data1
+
+#filter out california:
+data = data[data$state != "CA" & data$num_states == 1 & data$quarterlyMW == 1,]
+
+# filter out unwanted variables:
+#data = data[data$agegrp == "A01",]
+data = data[data$agegrp == "A00" & data$industry %in% c("72","44-45"),]
+# & data$industry %in% c("72","44-45")
+data$MainB_prop_1[is.na(data$MainB_prop_1)] = 1
+
+# Concentration metrics:
+data$competition = COMP(data)
+#data$competition = data$EE / data$ENFullQ
+
+data$ref_wage = data$avg_wkly_wage / data$minimum_wage
+data$TOTAL_ref_wage = data$TOTAL_avg_wkly_wage / data$minimum_wage
+
+data = data[c(labelCols, logCols, otherCols)]
+data = na.omit(data)
+
+for(col in logCols){
+  data = data[data[[col]] > 0 & data[[col]] < Inf,]
+}
+
+data3 = data
+data3$competition = log(data3$competition)
+stargazer(data3[summarycols1], type="latex",title="Summary Statistics",style="qje", summary.stat=c("n","mean","median","sd"), covariate.labels=summarylabels1)
+
+panelData = data
+panelData$date = panelData$year + (panelData$quarter-1)/4
+panelData$areaQuarter = paste(data$geography, data$quarter)
+panelData$areaQuarterState = paste(panelData$areaQuarter, panelData$state)
+panelData$areaQuarterIndustry = paste(panelData$areaQuarter, data$industry)
+
+panelData = panelData[!is.na(panelData$date),]
+panelData = pdata.frame(panelData, index=c("year","industry","areaQuarterState"))
+
+
+reg.fixed2 = plm(formula, data=panelData, model="within", effect="twoways")
+
+ci = data.frame()
+probs = c(0,0.1,0.7,1)
+q = quantile(panelData$competition, probs=probs, na.rm=T)
+for(i in (1:(length(probs)-1))){
+  dataQ = panelData[panelData$competition < q[i+1] & panelData$competition >= q[i],]
+  tc = qt(0.975, dim(dataQ)[1])
+  r = plm(formula2, data=dataQ, model="within", effect="twoways")
+  s = summary(r)$coefficients
+  vars = dimnames(s)[[1]]
+  #print(summary(r)$coefficients)
+  point = s[vars == "log(minimum_wage)",1]
+  #point = summary(r)$coefficients[1,1]
+  t = s[vars == "log(minimum_wage)",2]
+  #t = summary(r)$coefficients[1,2]
+  fixedS = summary(reg.fixed)$coefficients
+  fixedVars = dimnames(fixedS)[[1]]
+  fixedPoint = fixedS[fixedVars == "log(minimum_wage)",1]
+  fixedPointComp = fixedS[fixedVars == "log(minimum_wage):log(competition)",1]
+  med = median(dataQ$competition)
+  
+  ci = rbind(ci, c(log(med), point, point - tc*t, point + tc*t, fixedPoint + fixedPointComp*log(med)))
+}
+colnames(ci) = c("Log Competition","MW Elasticity of Employment","lower","upper", "Estimated Elasticity")
+ci2A = ci
+
+ci = data.frame()
+probs = seq(0,1,0.1)
+q = quantile(panelData$competition, probs=probs, na.rm=T)
+for(i in (1:(length(probs)-1))){
+  dataQ = panelData[panelData$competition < q[i+1] & panelData$competition >= q[i],]
+  tc = qt(0.975, dim(dataQ)[1])
+  r = plm(formula2, data=dataQ, model="within", effect="twoways")
+  s = summary(r)$coefficients
+  vars = dimnames(s)[[1]]
+  #print(summary(r)$coefficients)
+  point = s[vars == "log(minimum_wage)",1]
+  #point = summary(r)$coefficients[1,1]
+  t = s[vars == "log(minimum_wage)",2]
+  #t = summary(r)$coefficients[1,2]
+  fixedS = summary(reg.fixed)$coefficients
+  fixedVars = dimnames(fixedS)[[1]]
+  fixedPoint = fixedS[fixedVars == "log(minimum_wage)",1]
+  fixedPointComp = fixedS[fixedVars == "log(minimum_wage):log(competition)",1]
+  med = median(dataQ$competition)
+  
+  ci = rbind(ci, c(log(med), point, point - tc*t, point + tc*t, fixedPoint + fixedPointComp*log(med)))
+}
+colnames(ci) = c("Log Competition","MW Elasticity of Employment","lower","upper", "Estimated Elasticity")
+ci2B = ci
+
+
+
+stargazer(reg.fixed, reg.fixed2, type="text", column.labels=c("Young Workers","Restaurant/Retail"), star.cutoffs=c(0.05,0.01,0.001), style="qje")
+
+# ggplot(ci1A, aes(`Log Competition`, `MW Elasticity of Employment`)) +        # ggplot2 plot with confidence intervals
+#   #geom_line(aes(x=`Log Competition`, y=`Estimated Elasticity`, color="red")) +
+#   geom_point() +
+#   geom_errorbar(aes(ymin = lower, ymax = upper)) +
+#   labs(title="Young Workers, A")
+
+
+ggplot(ci1B, aes(`Log Competition`, `MW Elasticity of Employment`)) +        # ggplot2 plot with confidence intervals
+  #geom_line(aes(x=`Log Competition`, y=`Estimated Elasticity`, color="red")) +
+  geom_point() +
+  geom_errorbar(aes(ymin = lower, ymax = upper)) +
+  ylim(-1,1) +
+  theme_classic() +
+  theme(panel.grid.major.y=element_line())
+#ggsave("A_young.jpg", width=10, height=6)
+# ggplot(ci2A, aes(`Log Competition`, `MW Elasticity of Employment`)) +        # ggplot2 plot with confidence intervals
+#   #geom_line(aes(x=`Log Competition`, y=`Estimated Elasticity`, color="red")) +
+#   geom_point() +
+#   geom_errorbar(aes(ymin = lower, ymax = upper)) +
+#   labs(title="Restaurant/Retail, A")
+
+
+ggplot(ci2B, aes(`Log Competition`, `MW Elasticity of Employment`)) +        # ggplot2 plot with confidence intervals
+  #geom_line(aes(x=`Log Competition`, y=`Estimated Elasticity`, color="red")) +
+  geom_point() +
+  geom_errorbar(aes(ymin = lower, ymax = upper)) +
+  ylim(-1,1) +
+  theme_classic() +
+  theme(panel.grid.major.y=element_line())
+#ggsave("A_rest.jpg", width=10, height=6)
+```
+
+
+
+
+
+
+
+Function for easy testing:
+```{r, warning=F, echo=F, out.width="50%"}
+formula2 = as.formula("log(MainB) ~ log(minimum_wage) + log(TOTAL_qtrly_estabs_count) + 
+                     log(TOTAL_month1_emplvl) + log(TOTAL_total_qtrly_wages) + log(TOTAL_avg_wkly_wage) +
+                     TOTAL_ref_wage + metro_size + log(MainB_1) + log(MainB_prop_1) + as.factor(quarter)")
+
+
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+
+plots = data.frame()
+results = data.frame()
+
+# use "text" or "latex" for summStats
+analyze = function(comp_numerator="EES",comp_denominator="ENSep",worker="young",cal=F,transformation="log",shuff=F,summStats=F,plot=F){
+  
+  data = filter(data1, num_states==1, quarterlyMW==1)
+  
+  if(!cal){
+    data = filter(data, state != "CA")
+  }
+  
+  if(worker == "young"){
+    data = filter(data, agegrp=="A01")
+  } else if(worker == "rest/retail"){
+    data = filter(data, agegrp=="A00", industry %in% c("72","44-45"))
+  }
+  
+  data$MainB_prop_1[is.na(data$MainB_prop_1)] = 1
+  
+  # Concentration metrics:
+  data$competition = data[,comp_numerator] / data[,comp_denominator]
+  
+  if(shuff){
+    data$minimum_wage = sample(data$minimum_wage)
+  }
+  
+  if(transformation=="log"){
+    data = filter(data, competition > 0, competition < Inf)
+    data$competition = log(data$competition)
+  } else if(transformation=="log+1"){
+    data$competition = log(data$competition + 1)
+  } else if(transformation=="asinh"){
+    data$competition = asinh(data$competition)
+  } else if(transformation=="log+0.001"){
+    data$competition = log(data$competition + 0.001)
+  }
+  
+  
+  
+  data$ref_wage = data$avg_wkly_wage / data$minimum_wage
+  data$TOTAL_ref_wage = data$TOTAL_avg_wkly_wage / data$minimum_wage
+  
+  
+  formula = as.formula("log(MainB) ~ log(minimum_wage) + competition + log(minimum_wage):competition +
+                       log(TOTAL_qtrly_estabs_count) + log(TOTAL_month1_emplvl) + log(TOTAL_total_qtrly_wages) + 
+                       log(TOTAL_avg_wkly_wage) + TOTAL_ref_wage + metro_size + log(MainB_1) + log(MainB_prop_1) + 
+                       as.factor(quarter)")
+  
+  
+  labelCols = c("year","quarter","state","geography","industry")
+  logCols = c("avg_wkly_wage","MainB","MainB_prop_1","MainB_1","TOTAL_qtrly_estabs_count","TOTAL_month1_emplvl","TOTAL_total_qtrly_wages","TOTAL_avg_wkly_wage",
+              "minimum_wage")
+  otherCols = c("metro_size","TOTAL_ref_wage","competition")
+  
+  data = data[c(labelCols, logCols, otherCols)]
+  data = na.omit(data)
+  #data3 = data
+  for(col in logCols){
+    data = data[data[[col]] > 0 & data[[col]] < Inf,]
+    #data3 = data3[data3[[col]] > 0 & data3[[col]] < Inf,]
+    #data3[[col]] = log(data3[[col]])
+  }
+  data = filter(data, competition < Inf)
+  
+  if(summStats!=F){
+    print(stargazer(data, type=summStats,title="Summary Statistics",style="qje"))
+  }
+  
+  panelData = data
+  #panelData$date = panelData$year + (panelData$quarter-1)/4
+  panelData$areaQuarter = paste(data$geography, data$quarter)
+  panelData$areaQuarterState = paste(panelData$areaQuarter, panelData$state)
+  #panelData$areaQuarterIndustry = paste(panelData$areaQuarter, data$industry)
+  
+  #panelData = panelData[!is.na(panelData$date),]
+  panelData = pdata.frame(panelData, index=c("year","industry","areaQuarterState"))
+  
+  
+  reg.fixed = plm(formula, data=panelData, model="within", effect="twoways")
+  
+  res = c(summary(reg.fixed)$coef["log(minimum_wage)",],summary(reg.fixed)$coef["log(minimum_wage):competition",],
+          comp_numerator,comp_denominator,worker,cal,transformation,shuff, dim(data)[1])
+  
+  if(plot){
+    ci = data.frame()
+    probs = seq(0,1,0.1)
+    q = quantile(panelData$competition, probs=probs, na.rm=T)
+    for(i in (1:(length(probs)-1))){
+      dataQ = panelData[panelData$competition < q[i+1] & panelData$competition >= q[i],]
+      tc = qt(0.975, dim(dataQ)[1])
+      r = plm(formula2, data=dataQ, model="within", effect="twoways")
+      s = summary(r)$coefficients
+      vars = dimnames(s)[[1]]
+      #print(summary(r)$coefficients)
+      point = s[vars == "log(minimum_wage)",1]
+      #point = summary(r)$coefficients[1,1]
+      t = s[vars == "log(minimum_wage)",2]
+      #t = summary(r)$coefficients[1,2]
+      fixedS = summary(reg.fixed)$coefficients
+      fixedVars = dimnames(fixedS)[[1]]
+      fixedPoint = fixedS[fixedVars == "log(minimum_wage)",1]
+      fixedPointComp = fixedS[fixedVars == "log(minimum_wage):competition",1]
+      med = median(dataQ$competition)
+      
+      ci = rbind(ci, c(med, point, point - tc*t, point + tc*t, fixedPoint + fixedPointComp*med))
+    }
+    colnames(ci) = c("Competition","MW Elasticity of Employment","lower","upper", "Estimated Elasticity")
+    ci$Numerator=comp_numerator
+    ci$Denominator=comp_denominator
+    ci$Workers = worker
+    ci$California = cal
+    ci$Transformation=transformation
+    ci$Shuffle=shuff
+    
+    plots = rbind(plots, ci)
+  }
+  
+  return(res)
+
+}
+
+
+
+# Need to shuffle competition or MW?
+# No competition:
+analyze2 = function(worker,cal,shuff,summStats=F,plot=F){
+  
+  data = filter(data1, num_states==1, quarterlyMW==1)
+  
+  if(!cal){
+    data = filter(data, state != "CA")
+  }
+  
+  if(worker == "young"){
+    data = filter(data, agegrp=="A01")
+  } else if(worker == "rest/retail"){
+    data = filter(data, agegrp=="A00", industry %in% c("72","44-45"))
+  }
+  
+  if(shuff){
+    data$minimum_wage = sample(data$minimum_wage)
+  }
+  
+  data$MainB_prop_1[is.na(data$MainB_prop_1)] = 1
+  
+  data$ref_wage = data$avg_wkly_wage / data$minimum_wage
+  data$TOTAL_ref_wage = data$TOTAL_avg_wkly_wage / data$minimum_wage
+  
+  
+  formula = as.formula("log(MainB) ~ log(minimum_wage) +
+                       log(TOTAL_qtrly_estabs_count) + log(TOTAL_month1_emplvl) + log(TOTAL_total_qtrly_wages) + 
+                       log(TOTAL_avg_wkly_wage) + TOTAL_ref_wage + metro_size + log(MainB_1) + log(MainB_prop_1) + 
+                       as.factor(quarter)")
+  
+  
+  labelCols = c("year","quarter","state","geography","industry")
+  logCols = c("avg_wkly_wage","MainB","MainB_prop_1","MainB_1","TOTAL_qtrly_estabs_count","TOTAL_month1_emplvl","TOTAL_total_qtrly_wages","TOTAL_avg_wkly_wage",
+              "minimum_wage")
+  otherCols = c("metro_size","TOTAL_ref_wage")
+  
+  data = data[c(labelCols, logCols, otherCols)]
+  data = na.omit(data)
+  #data3 = data
+  for(col in logCols){
+    data = data[data[[col]] > 0 & data[[col]] < Inf,]
+    #data3 = data3[data3[[col]] > 0 & data3[[col]] < Inf,]
+    #data3[[col]] = log(data3[[col]])
+  }
+
+  if(summStats!=F){
+    print(stargazer(data, type=summStats,title="Summary Statistics",style="qje"))
+  }
+  
+  panelData = data
+  #panelData$date = panelData$year + (panelData$quarter-1)/4
+  panelData$areaQuarter = paste(data$geography, data$quarter)
+  panelData$areaQuarterState = paste(panelData$areaQuarter, panelData$state)
+  #panelData$areaQuarterIndustry = paste(panelData$areaQuarter, data$industry)
+  
+  #panelData = panelData[!is.na(panelData$date),]
+  panelData = pdata.frame(panelData, index=c("year","industry","areaQuarterState"))
+  
+  
+  reg.fixed = plm(formula, data=panelData, model="within", effect="twoways")
+  
+  res = c(summary(reg.fixed)$coef["log(minimum_wage)",],NA,NA,NA,NA,
+          "---","---",worker,cal,"---",shuff,dim(data)[1])
+  
+  return(res)
+
+}
+
+
+comp_numerators = c("EES","EE")
+comp_denominators = c("ENSep","ENPersist","ENFullQ","ENPersistS")
+workers = c("young","rest/retail")
+california = c(T,F)
+transformations = c("log", "log+1","log+0.001", "asinh")
+shuffle = c(T,F)
+
+# counter = 1
+# for(num in comp_numerators){
+#   for(den in comp_denominators){
+#     for(worker in workers){
+#       for(cal in california){
+#         for(transformation in transformations){
+#           for(shuff in shuffle){
+#             print(counter)
+#             results = rbind(results, analyze(num, den, worker, cal, transformation, shuff))
+#             counter = counter + 1
+#           }
+#         }
+#       }
+#     }
+#   }
+# }
+
+counter = 1
+for(worker in workers){
+  for(cal in california){
+    for(shuff in shuffle){
+      print(counter)
+      results = rbind(results, analyze2(worker, cal, shuff))
+      counter = counter + 1
+      for(num in comp_numerators){
+        for(den in comp_denominators){
+          for(transformation in transformations){
+            print(counter)
+            results = rbind(results, analyze(num, den, worker, cal, transformation, shuff))
+            counter = counter + 1            
+          }
+        }
+      }
+    }
+  }
+}
+
+
+colnames(results) = c("MW Estimate","MW Std. Error","MW t-value","MW Pr(>|t|)",
+                      "C Estimate","C Std. Error"," C t-value", "C Pr(>|t|)",
+                      "Numerator","Denominator","Workers","California","Transformation","Shuffle","N")
+for(col in (1:8)){
+  results[,col] = as.numeric(results[,col])
+}
+results$N = as.numeric(results$N)
+
+# saved as RobustJ2J.csv
+# write.csv(results, "RobustJ2J.csv", row.names=F)
+# results = read.csv("RobustJ2J.csv")
+
+# ggplot(ci1B, aes(`Log Competition`, `MW Elasticity of Employment`)) +        # ggplot2 plot with confidence intervals
+#   #geom_line(aes(x=`Log Competition`, y=`Estimated Elasticity`, color="red")) +
+#   geom_point() +
+#   geom_errorbar(aes(ymin = lower, ymax = upper)) +
+#   ylim(-1,1) +
+#   theme_classic() +
+#   theme(panel.grid.major.y=element_line())
+```
+
+```{r, warning=F}
+# Alternative: repeating a lot for similar settings
+comp_numerators = c("EES")#,"EE")
+comp_denominators = c("ENSep")#,"ENPersist","ENFullQ","ENPersistS")
+workers = c("young","rest/retail")
+california = c(F)#,T)
+transformations = c("log")#, "log+1","log+0.001", "asinh")
+shuffle = c(T,F)
+
+results = data.frame()
+set.seed(123)
+counter = 1
+for(i in (1:50)){
+  for(worker in workers){
+    for(cal in california){
+      for(shuff in shuffle){
+        print(counter)
+        results = rbind(results, analyze2(worker, cal, shuff))
+        counter = counter + 1
+        for(num in comp_numerators){
+          for(den in comp_denominators){
+            for(transformation in transformations){
+              print(counter)
+              results = rbind(results, analyze(num, den, worker, cal, transformation, shuff))
+              counter = counter + 1            
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+
+colnames(results) = c("MW Estimate","MW Std. Error","MW t-value","MW Pr(>|t|)",
+                      "C Estimate","C Std. Error"," C t-value", "C Pr(>|t|)",
+                      "Numerator","Denominator","Workers","California","Transformation","Shuffle","N")
+for(col in (1:8)){
+  results[,col] = as.numeric(results[,col])
+}
+results$N = as.numeric(results$N)
+```
+
+
+```{r}
+#results = read.csv("RobustJ2J.csv")
+colnames(results) = c("MW Estimate","MW Std. Error","MW t-value","MW Pr(>|t|)",
+                      "C Estimate","C Std. Error"," C t-value", "C Pr(>|t|)",
+                      "Numerator","Denominator","Workers","California","Transformation","Shuffle","N")
+ggplot(results[results$Shuffle==T,]) +
+  geom_density(aes(x=`C Pr(>|t|)`, group=Shuffle, col=Shuffle)) +
+  theme_classic() +
+  labs(x="Significance",y="Density",title="Significance of Interaction Coefficient") +
+  theme(panel.grid.major.y=element_line())
+
+ggplot(results[]) +
+  geom_density(aes(x=`MW Pr(>|t|)`, group=Shuffle, col=Shuffle)) +
+  theme_classic() +
+  labs(x="Significance",y="Density",title="Significance of MW Coefficient") +
+  theme(panel.grid.major.y=element_line())
+
+# Comp term is much more verified by these than MW.  Would this indicate that MW effects are not captured, but interaction effects are?
+
+robust_reg = lm(`C Pr(>|t|)` ~ Numerator + Denominator + Workers + California + Transformation + Shuffle, data=results)
+summary(robust_reg)
+```
+
+
+
+
+
+Individual data method:
+```{r, warning=F,echo=F, include=F}
+# Individual:
+
+rm(list=ls())
+library(plm)
+library(stargazer)
+
+summarycols2 = c("AGE","EARNWT","employed","empW","EMP_RATE","COMPETITION","MW_FED","MW_STATE","MW","RealMW","REAL_CHANGE","CHANGE_PCT","BindBefore","HOURWAGE","REF_WAGE","WAGE_BIN")
+summarylabels2 = c("Age","Survey Weight","Employed","Employed (Weighted","Employment per Capita","Log Competition","Fed MW","State MW","Effective MW","Real MW","Real MW Change","MW Change Pct","Bind","Wage","Reference Wage","Wage Bin")
+
+
+data = read.csv("IndividualDataConc2Tenths.csv")
+data$RealMW = data$MW / data$CPI_FACTOR
+data$DIST_YEAR = floor(data$DIST/4)
+data$DIST_YEAR[data$DIST_YEAR == 249] = -999
+data$EMP_RATE = data$empW / data$POPULATION
+data$EMP_RATE_SUB = data$empW / data$POPULATION_SUB
+data$EMP_RATE_SUB[is.na(data$EMP_RATE_SUB)] = 0
+
+data = data[!(colnames(data) %in% c("DIST_F","DIST_B","NextMW"))]
+data = data[data$DIST_YEAR > -100,]
+data$DIST_YEAR[data$DIST_YEAR == -1] = -999
+
+dataAgg = aggregate(empW ~ YEAR + QUARTER + STATE + POPULATION + RealMW + DIST + DIST_YEAR, data=data, FUN=sum)
+dataAgg$empRate = dataAgg$empW / dataAgg$POPULATION
+
+dataAgg2 = aggregate(empW ~ YEAR + QUARTER + STATE + COMP_Q + POPULATION_SUB + POPULATION + RealMW + DIST + DIST_YEAR, data=data, FUN=sum)
+dataAgg2$empRate = dataAgg2$empW / dataAgg2$POPULATION
+dataAgg2$empRate_Sub = dataAgg2$empW / dataAgg2$POPULATION_SUB
+
+controlData = read.csv("ControlData.csv")
+
+controlData = controlData[!grepl("Sep",colnames(controlData))]
+
+
+
+colnames(controlData)[colnames(controlData) %in% c("geography","industry","agegrp","year","quarter")] = c("GEOGRAPHY","INDUSTRY","AGEGRP","YEAR","QUARTER")
+vars = colnames(controlData)[(6:length(colnames(controlData)))]
+labels = colnames(controlData)[(1:3)]
+
+# Create lagged values instead of present values
+controlData$QUARTER = controlData$QUARTER + 1
+controlData$YEAR[controlData$QUARTER==5] = controlData$YEAR[controlData$QUARTER==5] + 1
+controlData$QUARTER[controlData$QUARTER==5] = 1
+
+
+data$GEOGRAPHY = data$METFIPS
+data$GEOGRAPHY[data$GEOGRAPHY > 60] = data$STATEFIP[data$GEOGRAPHY > 60]
+
+totalData = merge(data, controlData,all.x=T)
+keeps = c()
+for(v in colnames(totalData)){
+  if(!sum(is.na(totalData[v]))){
+    keeps = c(keeps,v)
+  }
+}
+totalData = totalData[keeps]
+data = totalData
+
+# for aggregated data
+totalData = merge(dataAgg, controlData[controlData$INDUSTRY=="00" & controlData$AGEGRP=="A00",],all.x=T)
+keeps = c()
+for(v in colnames(totalData)){
+  if(!sum(is.na(totalData[v]))){
+    keeps = c(keeps,v)
+  }
+}
+totalData = totalData[keeps]
+dataAgg = totalData
+
+# agg 2
+totalData = merge(dataAgg2, controlData[controlData$INDUSTRY=="00" & controlData$AGEGRP=="A00",],all.x=T)
+keeps = c()
+for(v in colnames(totalData)){
+  if(!sum(is.na(totalData[v]))){
+    keeps = c(keeps,v)
+  }
+}
+totalData = totalData[keeps]
+dataAgg2 = totalData
+
+rm(controlData)
+
+logControls = c("POPULATION","POPULATION_SUB",colnames(data)[(42:dim(data)[2])])
+logControls = logControls[!(logControls %in% c("MHire","POPULATION","ENPersist"))] #from VIF testing below
+otherControls = c("AGE","as.factor(INDUSTRY)")
+for(v in logControls){
+  data[v] = log(data[v] + min(1,min(data[v][data[v]>0])))
+}
+
+
+
+
+data3 = data[data$COMPETITION > 0 & data$COMPETITION < Inf,]
+data3$COMPETITION = log(data3$COMPETITION)
+stargazer(data3[summarycols2], type="latex",title="Summary Statistics",style="qje", summary.stat=c("n","mean","median","sd"), covariate.labels=summarylabels2)
+
+
+formula1C = formula(paste("log(empW+1) ~ log(RealMW) + as.factor(STATE) + as.factor(YEAR) + AGE + as.factor(INDUSTRY)",paste(logControls,collapse="+"),sep="+"))
+
+reg1 = lm(log(empW+1) ~ log(RealMW) + as.factor(STATE) + as.factor(YEAR), data=data)
+reg1C = lm(formula1C,data=data)
+#  log(COMPETITION+0.001) + log(RealMW):log(COMPETITION+0.001) + 
+# coef = summary(reg1)$coef
+# coef = coef[rownames(coef) %in% c("log(RealMW)","log(RealMW):log(COMPETITION + 0.001)"),]
+# print(coef)
+# coef = summary(reg1C)$coef
+# coef = coef[rownames(coef) %in% c("log(RealMW)","log(RealMW):log(COMPETITION + 0.001)"),]
+# print(coef)
+
+# Add competition:
+formula2C = formula(paste("log(empW+1) ~ log(RealMW) + log(COMPETITION) + log(RealMW):log(COMPETITION) + as.factor(STATE) + as.factor(YEAR) + AGE + as.factor(INDUSTRY)",paste(logControls,collapse="+"),sep="+"))
+reg2 = lm(log(empW+1) ~ log(RealMW) + log(COMPETITION) + log(RealMW):log(COMPETITION) + as.factor(STATE) + as.factor(YEAR), data=filter(data,COMPETITION>0))
+reg2C = lm(formula2C, data=filter(data,COMPETITION>0))
+# coef = summary(reg2)$coef
+# coef = coef[rownames(coef) %in% c("log(RealMW)","log(RealMW):log(COMPETITION + 0.001)"),]
+# print(coef)
+# coef = summary(reg2C)$coef
+# coef = coef[rownames(coef) %in% c("log(RealMW)","log(RealMW):log(COMPETITION + 0.001)"),]
+# print(coef)
+
+
+stargazer(reg1,reg1C,reg2,reg2C,type="text", column.separate=c(2,2), column.labels=c("Basic","With Competition"), 
+          dep.var.labels="Log Employment", star.cutoffs=c(0.05,0.01,0.001), style="qje")
+```

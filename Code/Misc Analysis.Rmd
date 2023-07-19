@@ -1,0 +1,38 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(stringr)
+```
+
+
+```{r}
+geoNames = read.delim("J2J\\Geo Names.txt", header=F)
+geoNames = data.frame(geoNames[!(geoNames$V1 %in% c("Origin","Destination")),])
+colnames(geoNames) = c("label")
+geoNames$code = as.numeric(str_sub(geoNames$label, 1,5))
+geoNames$name = str_sub(geoNames$label, 6)
+geoNames = geoNames[str_sub(geoNames$name,1,8) == " Not in ",]
+notMetro = geoNames$code
+
+j2j = read.csv("J2J_3.csv")
+j2j = j2j[colnames(j2j) %in% c("agegrp","year","quarter","geography_orig","industry_orig","EES","EE")]
+colnames(j2j) = c("agegrp","year","quarter","geography","industry","EE","EES")
+sep = read.csv("Separations All.csv")
+
+total = merge(j2j,sep)
+total$isMetro = as.numeric(!(total$geography %in% notMetro))
+total$conc = total$EES / total$ENSep
+
+total = filter(total, conc > 0, conc < Inf, !is.na(conc))
+```
+
+```{r}
+hist(log(total$conc))
+hist(total$isMetro)
+reg = lm(log(conc) ~ isMetro, data=total)
+summary(reg)
+```
+
